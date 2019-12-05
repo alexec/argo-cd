@@ -32,6 +32,7 @@ func NewRepoCommand(clientOpts *argocdclient.ClientOptions) *cobra.Command {
 	}
 
 	command.AddCommand(NewRepoAddCommand(clientOpts))
+	command.AddCommand(NewRepoAppDetailsCommand(clientOpts))
 	command.AddCommand(NewRepoListCommand(clientOpts))
 	command.AddCommand(NewRepoRemoveCommand(clientOpts))
 	return command
@@ -178,6 +179,46 @@ func NewRepoAddCommand(clientOpts *argocdclient.ClientOptions) *cobra.Command {
 	command.Flags().BoolVar(&insecureSkipServerVerification, "insecure-skip-server-verification", false, "disables server certificate and host key checks")
 	command.Flags().BoolVar(&enableLfs, "enable-lfs", false, "enable git-lfs (Large File Support) on this repository")
 	command.Flags().BoolVar(&upsert, "upsert", false, "Override an existing repository with the same name even if the spec differs")
+	return command
+}
+
+// NewRepoRemoveCommand returns a new instance of an `argocd repo list` command
+func NewRepoAppDetailsCommand(clientOpts *argocdclient.ClientOptions) *cobra.Command {
+	var output string
+	var path string
+	var targetRevision string
+	var command = &cobra.Command{
+		Use:   "app details REPO",
+		Short: "Get app details",
+		Run: func(c *cobra.Command, args []string) {
+			if len(args) != 1 {
+				c.HelpFunc()(c, args)
+				os.Exit(1)
+			}
+			repoURL := args[0]
+			conn, repoIf := argocdclient.NewClientOrDie(clientOpts).NewRepoClientOrDie()
+			defer util.Close(conn)
+
+			details, err := repoIf.GetAppDetails(context.Background(), &repositorypkg.RepoAppDetailsQuery{
+				Source: &appsv1.ApplicationSource{
+					RepoURL:        repoURL,
+					Path:           path,
+					TargetRevision: targetRevision,
+				},
+			})
+			errors.CheckError(err)
+			switch output {
+			case "yaml", "json":
+				errors.CheckError(PrintResource(details, output))
+			default:
+				errors.CheckError(fmt.Errorf("unknown output format: %s", output))
+			}
+		},
+	}
+	command.Flags().StringVarP(&output, "output", "o", "yaml", "Output format. One of: json|yaml")
+	command.Flags().StringVar(&path, "path", ".", "Path within the repo")
+	command.Flags().StringVar(&path, "targetRevision", "HEAD", "Target revision")
+
 	return command
 }
 
