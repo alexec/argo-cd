@@ -27,7 +27,7 @@ data:
   help.chatText: 'Chat now!'
 
   # A dex connector configuration (optional). See SSO configuration documentation:
-  # https://github.com/argoproj/argo-cd/blob/master/docs/operator-manual/sso.md
+  # https://github.com/argoproj/argo-cd/blob/master/docs/operator-manual/sso
   # https://github.com/dexidp/dex/tree/master/Documentation/connectors
   dex.config: |
     connectors:
@@ -102,6 +102,29 @@ data:
         jsonPointers:
         - webhooks/0/clientConfig/caBundle
     certmanager.k8s.io/Certificate:
+      # Lua script for customizing the health status assessment
+      health.lua: |
+        hs = {}
+        if obj.status ~= nil then
+          if obj.status.conditions ~= nil then
+            for i, condition in ipairs(obj.status.conditions) do
+              if condition.type == "Ready" and condition.status == "False" then
+                hs.status = "Degraded"
+                hs.message = condition.message
+                return hs
+              end
+              if condition.type == "Ready" and condition.status == "True" then
+                hs.status = "Healthy"
+                hs.message = condition.message
+                return hs
+              end
+            end
+          end
+        end
+        hs.status = "Progressing"
+        hs.message = "Waiting for certificate"
+        return hs
+    cert-manager.io/Certificate:
       # Lua script for customizing the health status assessment
       health.lua: |
         hs = {}

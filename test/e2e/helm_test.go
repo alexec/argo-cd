@@ -64,20 +64,6 @@ func TestHelmHookDeletePolicy(t *testing.T) {
 		Expect(NotPod(func(p v1.Pod) bool { return p.Name == "hook" }))
 }
 
-func TestHelmCrdInstallIsCreated(t *testing.T) {
-	Given(t).
-		Path("hook").
-		When().
-		PatchFile("hook.yaml", `[{"op": "replace", "path": "/metadata/annotations", "value": {"helm.sh/hook": "crd-install"}}]`).
-		Create().
-		Sync().
-		Then().
-		Expect(OperationPhaseIs(OperationSucceeded)).
-		Expect(HealthIs(HealthStatusHealthy)).
-		Expect(SyncStatusIs(SyncStatusCodeSynced)).
-		Expect(ResourceResultNumbering(2))
-}
-
 func TestDeclarativeHelm(t *testing.T) {
 	Given(t).
 		Path("helm").
@@ -98,13 +84,13 @@ func TestDeclarativeHelmInvalidValuesFile(t *testing.T) {
 		Then().
 		Expect(HealthIs(HealthStatusHealthy)).
 		Expect(SyncStatusIs(SyncStatusCodeUnknown)).
-		Expect(Condition(ApplicationConditionComparisonError, "open does-not-exist-values.yaml: no such file or directory"))
+		Expect(Condition(ApplicationConditionComparisonError, "does-not-exist-values.yaml: no such file or directory"))
 }
 
 func TestHelmRepo(t *testing.T) {
 	Given(t).
 		CustomCACertAdded().
-		HelmRepoAdded("").
+		HelmRepoAdded("custom-repo").
 		RepoURLType(RepoURLTypeHelm).
 		Chart("helm").
 		Revision("1.0.0").
@@ -132,6 +118,19 @@ func TestHelmValues(t *testing.T) {
 		})
 }
 
+func TestHelmCrdHook(t *testing.T) {
+	Given(t).
+		Path("helm-crd").
+		When().
+		Create().
+		Sync().
+		Then().
+		Expect(OperationPhaseIs(OperationSucceeded)).
+		Expect(HealthIs(HealthStatusHealthy)).
+		Expect(SyncStatusIs(SyncStatusCodeSynced)).
+		Expect(ResourceResultNumbering(2))
+}
+
 func TestHelmReleaseName(t *testing.T) {
 	Given(t).
 		Path("helm").
@@ -149,10 +148,10 @@ func TestHelmSet(t *testing.T) {
 		Path("helm").
 		When().
 		Create().
-		AppSet("--helm-set", "foo=bar", "--helm-set", "foo=baz").
+		AppSet("--helm-set", "foo=bar", "--helm-set", "foo=baz", "--helm-set", "app=$ARGOCD_APP_NAME").
 		Then().
 		And(func(app *Application) {
-			assert.Equal(t, []HelmParameter{{Name: "foo", Value: "baz"}}, app.Spec.Source.Helm.Parameters)
+			assert.Equal(t, []HelmParameter{{Name: "foo", Value: "baz"}, {Name: "app", Value: "$ARGOCD_APP_NAME"}}, app.Spec.Source.Helm.Parameters)
 		})
 }
 
@@ -161,10 +160,41 @@ func TestHelmSetString(t *testing.T) {
 		Path("helm").
 		When().
 		Create().
-		AppSet("--helm-set-string", "foo=bar", "--helm-set-string", "foo=baz").
+		AppSet("--helm-set-string", "foo=bar", "--helm-set-string", "foo=baz", "--helm-set-string", "app=$ARGOCD_APP_NAME").
 		Then().
 		And(func(app *Application) {
-			assert.Equal(t, []HelmParameter{{Name: "foo", Value: "baz", ForceString: true}}, app.Spec.Source.Helm.Parameters)
+			assert.Equal(t, []HelmParameter{{Name: "foo", Value: "baz", ForceString: true}, {Name: "app", Value: "$ARGOCD_APP_NAME", ForceString: true}}, app.Spec.Source.Helm.Parameters)
+		})
+}
+
+// ensure we can use envsubst in "set" variables
+func TestHelmSetEnv(t *testing.T) {
+	Given(t).
+		Path("helm-values").
+		When().
+		Create().
+		AppSet("--helm-set", "foo=$ARGOCD_APP_NAME").
+		Sync().
+		Then().
+		Expect(OperationPhaseIs(OperationSucceeded)).
+		Expect(SyncStatusIs(SyncStatusCodeSynced)).
+		And(func(app *Application) {
+			assert.Equal(t, Name(), FailOnErr(Run(".", "kubectl", "-n", DeploymentNamespace(), "get", "cm", "my-map", "-o", "jsonpath={.data.foo}")).(string))
+		})
+}
+
+func TestHelmSetStringEnv(t *testing.T) {
+	Given(t).
+		Path("helm-values").
+		When().
+		Create().
+		AppSet("--helm-set-string", "foo=$ARGOCD_APP_NAME").
+		Sync().
+		Then().
+		Expect(OperationPhaseIs(OperationSucceeded)).
+		Expect(SyncStatusIs(SyncStatusCodeSynced)).
+		And(func(app *Application) {
+			assert.Equal(t, Name(), FailOnErr(Run(".", "kubectl", "-n", DeploymentNamespace(), "get", "cm", "my-map", "-o", "jsonpath={.data.foo}")).(string))
 		})
 }
 
@@ -194,7 +224,10 @@ func TestHelmWithDependenciesLegacyRepo(t *testing.T) {
 }
 
 func testHelmWithDependencies(t *testing.T, legacyRepo bool) {
-	ctx := Given(t).CustomCACertAdded()
+	ctx := Given(t).
+		CustomCACertAdded().
+		// these are slow tests
+		Timeout(30)
 	if legacyRepo {
 		ctx.And(func() {
 			errors.FailOnErr(fixture.Run("", "kubectl", "create", "secret", "generic", "helm-repo",

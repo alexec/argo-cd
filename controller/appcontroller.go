@@ -37,7 +37,7 @@ import (
 	"github.com/argoproj/argo-cd/reposerver/apiclient"
 	"github.com/argoproj/argo-cd/util"
 	"github.com/argoproj/argo-cd/util/argo"
-	argocache "github.com/argoproj/argo-cd/util/cache"
+	appstatecache "github.com/argoproj/argo-cd/util/cache/appstate"
 	"github.com/argoproj/argo-cd/util/db"
 	"github.com/argoproj/argo-cd/util/diff"
 	"github.com/argoproj/argo-cd/util/kube"
@@ -67,7 +67,7 @@ func (a CompareWith) Max(b CompareWith) CompareWith {
 
 // ApplicationController is the controller for application resources.
 type ApplicationController struct {
-	cache                     *argocache.Cache
+	cache                     *appstatecache.Cache
 	namespace                 string
 	kubeClientset             kubernetes.Interface
 	kubectl                   kube.Kubectl
@@ -103,13 +103,14 @@ func NewApplicationController(
 	kubeClientset kubernetes.Interface,
 	applicationClientset appclientset.Interface,
 	repoClientset apiclient.Clientset,
-	argoCache *argocache.Cache,
+	argoCache *appstatecache.Cache,
 	kubectl kube.Kubectl,
 	appResyncPeriod time.Duration,
 	selfHealTimeout time.Duration,
 	metricsPort int,
 	kubectlParallelismLimit int64,
 ) (*ApplicationController, error) {
+	log.Infof("appResyncPeriod=%v", appResyncPeriod)
 	db := db.NewDB(namespace, settingsMgr, kubeClientset)
 	ctrl := ApplicationController{
 		cache:                     argoCache,
@@ -136,7 +137,8 @@ func NewApplicationController(
 	if err != nil {
 		return nil, err
 	}
-	projInformer := v1alpha1.NewAppProjectInformer(applicationClientset, namespace, appResyncPeriod, cache.Indexers{})
+	indexers := cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}
+	projInformer := v1alpha1.NewAppProjectInformer(applicationClientset, namespace, appResyncPeriod, indexers)
 	metricsAddr := fmt.Sprintf("0.0.0.0:%d", metricsPort)
 	ctrl.metricsServer = metrics.NewMetricsServer(metricsAddr, appLister, func() error {
 		_, err := kubeClientset.Discovery().ServerVersion()
@@ -555,18 +557,8 @@ func (ctrl *ApplicationController) finalizeApplicationDeletion(app *appv1.Applic
 }
 
 func (ctrl *ApplicationController) setAppCondition(app *appv1.Application, condition appv1.ApplicationCondition) {
-	index := -1
-	for i, exiting := range app.Status.Conditions {
-		if exiting.Type == condition.Type {
-			index = i
-			break
-		}
-	}
-	if index > -1 {
-		app.Status.Conditions[index] = condition
-	} else {
-		app.Status.Conditions = append(app.Status.Conditions, condition)
-	}
+	app.Status.SetConditions([]appv1.ApplicationCondition{condition}, map[appv1.ApplicationConditionType]bool{condition.Type: true})
+
 	var patch []byte
 	patch, err := json.Marshal(map[string]interface{}{
 		"status": map[string]interface{}{
@@ -770,7 +762,17 @@ func (ctrl *ApplicationController) processAppRefreshQueueItem() (processNext boo
 			logCtx.Warnf("Failed to get cached managed resources for tree reconciliation, fallback to full reconciliation")
 		} else {
 			if tree, err := ctrl.getResourceTree(app, managedResources); err != nil {
-				app.Status.Conditions = []appv1.ApplicationCondition{{Type: appv1.ApplicationConditionComparisonError, Message: err.Error()}}
+				app.Status.SetConditions(
+					[]appv1.ApplicationCondition{
+						{
+							Type:    appv1.ApplicationConditionComparisonError,
+							Message: err.Error(),
+						},
+					},
+					map[appv1.ApplicationConditionType]bool{
+						appv1.ApplicationConditionComparisonError: true,
+					},
+				)
 			} else {
 				app.Status.Summary = tree.GetSummary()
 				if err = ctrl.cache.SetAppResourcesTree(app.Name, tree); err != nil {
@@ -803,6 +805,7 @@ func (ctrl *ApplicationController) processAppRefreshQueueItem() (processNext boo
 		revision = app.Status.Sync.Revision
 	}
 
+	observedAt := metav1.Now()
 	compareResult := ctrl.appStateManager.CompareAppState(app, revision, app.Spec.Source, refreshType == appv1.RefreshTypeHard, localManifests)
 
 	ctrl.normalizeApplication(origApp, app)
@@ -821,17 +824,25 @@ func (ctrl *ApplicationController) processAppRefreshQueueItem() (processNext boo
 		if project.Spec.SyncWindows.Matches(app).CanSync(false) {
 			syncErrCond := ctrl.autoSync(app, compareResult.syncStatus, compareResult.resources)
 			if syncErrCond != nil {
-				app.Status.SetConditions([]appv1.ApplicationCondition{*syncErrCond}, map[appv1.ApplicationConditionType]bool{appv1.ApplicationConditionSyncError: true})
+				app.Status.SetConditions(
+					[]appv1.ApplicationCondition{*syncErrCond},
+					map[appv1.ApplicationConditionType]bool{appv1.ApplicationConditionSyncError: true},
+				)
 			} else {
-				app.Status.SetConditions([]appv1.ApplicationCondition{}, map[appv1.ApplicationConditionType]bool{appv1.ApplicationConditionSyncError: true})
+				app.Status.SetConditions(
+					[]appv1.ApplicationCondition{},
+					map[appv1.ApplicationConditionType]bool{appv1.ApplicationConditionSyncError: true},
+				)
 			}
 		} else {
 			logCtx.Infof("Sync prevented by sync window")
 		}
 	}
 
-	app.Status.ObservedAt = &compareResult.reconciledAt
-	app.Status.ReconciledAt = &compareResult.reconciledAt
+	if app.Status.ReconciledAt == nil || comparisonLevel == CompareWithLatest {
+		app.Status.ReconciledAt = &observedAt
+	}
+	app.Status.ObservedAt = &observedAt
 	app.Status.Sync = *compareResult.syncStatus
 	app.Status.Health = *compareResult.healthStatus
 	app.Status.Resources = compareResult.resources
@@ -861,23 +872,22 @@ func (ctrl *ApplicationController) needRefreshAppStatus(app *appv1.Application, 
 	compareWith := CompareWithLatest
 	refreshType := appv1.RefreshTypeNormal
 	expired := app.Status.ReconciledAt == nil || app.Status.ReconciledAt.Add(statusRefreshTimeout).Before(time.Now().UTC())
-	if requestedType, ok := app.IsRefreshRequested(); ok || expired {
-		if ok {
-			refreshType = requestedType
-			reason = fmt.Sprintf("%s refresh requested", refreshType)
-		} else if expired {
-			reason = fmt.Sprintf("comparison expired. reconciledAt: %v, expiry: %v", app.Status.ReconciledAt, statusRefreshTimeout)
-		}
-	} else if requested, level := ctrl.isRefreshRequested(app.Name); requested {
-		compareWith = level
-		reason = fmt.Sprintf("controller refresh requested")
-	} else if app.Status.Sync.Status == appv1.SyncStatusCodeUnknown && expired {
-		reason = "comparison status unknown"
+
+	if requestedType, ok := app.IsRefreshRequested(); ok {
+		// user requested app refresh.
+		refreshType = requestedType
+		reason = fmt.Sprintf("%s refresh requested", refreshType)
+	} else if expired {
+		reason = fmt.Sprintf("comparison expired. reconciledAt: %v, expiry: %v", app.Status.ReconciledAt, statusRefreshTimeout)
 	} else if !app.Spec.Source.Equals(app.Status.Sync.ComparedTo.Source) {
 		reason = "spec.source differs"
 	} else if !app.Spec.Destination.Equals(app.Status.Sync.ComparedTo.Destination) {
 		reason = "spec.destination differs"
+	} else if requested, level := ctrl.isRefreshRequested(app.Name); requested {
+		compareWith = level
+		reason = fmt.Sprintf("controller refresh requested")
 	}
+
 	if reason != "" {
 		logCtx.Infof("Refreshing app status (%s), level (%d)", reason, compareWith)
 		return true, refreshType, compareWith

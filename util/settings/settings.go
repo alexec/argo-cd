@@ -66,9 +66,9 @@ type ArgoCDSettings struct {
 	// Secrets holds all secrets in argocd-secret as a map[string]string
 	Secrets map[string]string `json:"secrets,omitempty"`
 	// KustomizeBuildOptions is a string of kustomize build parameters
-	KustomizeBuildOptions string
+	KustomizeBuildOptions string `json:"kustomizeBuildOptions,omitempty"`
 	// Indicates if anonymous user is enabled or not
-	AnonymousUserEnabled bool
+	AnonymousUserEnabled bool `json:"anonymousUserEnabled,omitempty"`
 }
 
 type GoogleAnalytics struct {
@@ -105,7 +105,7 @@ type HelmRepoCredentials struct {
 }
 
 // Credentials for accessing a Git repository
-type RepoCredentials struct {
+type Repository struct {
 	// The URL to the repository
 	URL string `json:"url,omitempty"`
 	// the type of the repo, "git" or "helm", assumed to be "git" if empty or absent
@@ -124,6 +124,22 @@ type RepoCredentials struct {
 	Insecure bool `json:"insecure,omitempty"`
 	// Whether the repo is git-lfs enabled. Git only.
 	EnableLFS bool `json:"enableLfs,omitempty"`
+	// Name of the secret storing the TLS client cert data
+	TLSClientCertDataSecret *apiv1.SecretKeySelector `json:"tlsClientCertDataSecret,omitempty"`
+	// Name of the secret storing the TLS client cert's key data
+	TLSClientCertKeySecret *apiv1.SecretKeySelector `json:"tlsClientCertKeySecret,omitempty"`
+}
+
+// Credential template for accessing repositories
+type RepositoryCredentials struct {
+	// The URL pattern the repository URL has to match
+	URL string `json:"url,omitempty"`
+	// Name of the secret storing the username used to access the repo
+	UsernameSecret *apiv1.SecretKeySelector `json:"usernameSecret,omitempty"`
+	// Name of the secret storing the password used to access the repo
+	PasswordSecret *apiv1.SecretKeySelector `json:"passwordSecret,omitempty"`
+	// Name of the secret storing the SSH private key used to access the repo. Git only
+	SSHPrivateKeySecret *apiv1.SecretKeySelector `json:"sshPrivateKeySecret,omitempty"`
 	// Name of the secret storing the TLS client cert data
 	TLSClientCertDataSecret *apiv1.SecretKeySelector `json:"tlsClientCertDataSecret,omitempty"`
 	// Name of the secret storing the TLS client cert's key data
@@ -183,8 +199,8 @@ const (
 	resourceInclusionsKey = "resource.inclusions"
 	// configManagementPluginsKey is the key to the list of config management plugins
 	configManagementPluginsKey = "configManagementPlugins"
-	// kustomizeBuildOptions is a string of kustomize build parameters
-	kustomizeBuildOptions = "kustomize.buildOptions"
+	// kustomizeBuildOptionsKey is a string of kustomize build parameters
+	kustomizeBuildOptionsKey = "kustomize.buildOptions"
 	// anonymousUserEnabledKey is the key which enables or disables anonymous user
 	anonymousUserEnabledKey = "users.anonymous.enabled"
 )
@@ -201,6 +217,8 @@ type SettingsManager struct {
 	// mutex protects concurrency sensitive parts of settings manager: access to subscribers list and initialization flag
 	mutex             *sync.Mutex
 	initContextCancel func()
+	reposCache        []Repository
+	repoCredsCache    []RepositoryCredentials
 }
 
 type incompleteSettingsError struct {
@@ -217,6 +235,38 @@ func (mgr *SettingsManager) GetSecretsLister() (v1listers.SecretLister, error) {
 		return nil, err
 	}
 	return mgr.secrets, nil
+}
+
+func (mgr *SettingsManager) updateConfigMap(callback func(*apiv1.ConfigMap) error) error {
+	argoCDCM, err := mgr.getConfigMap()
+	createCM := false
+	if err != nil {
+		if !apierr.IsNotFound(err) {
+			return err
+		}
+		argoCDCM = &apiv1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: common.ArgoCDConfigMapName,
+			},
+		}
+		createCM = true
+	}
+	if argoCDCM.Data == nil {
+		argoCDCM.Data = make(map[string]string)
+	}
+	err = callback(argoCDCM)
+	if err != nil {
+		return err
+	}
+
+	if createCM {
+		_, err = mgr.clientset.CoreV1().ConfigMaps(mgr.namespace).Create(argoCDCM)
+	} else {
+		_, err = mgr.clientset.CoreV1().ConfigMaps(mgr.namespace).Update(argoCDCM)
+	}
+
+	mgr.invalidateCache()
+	return err
 }
 
 func (mgr *SettingsManager) getConfigMap() (*apiv1.ConfigMap, error) {
@@ -325,7 +375,10 @@ func (mgr *SettingsManager) GetKustomizeBuildOptions() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return argoCDCM.Data[kustomizeBuildOptions], nil
+	if value, ok := argoCDCM.Data[kustomizeBuildOptionsKey]; ok {
+		return value, nil
+	}
+	return "", nil
 }
 
 // DEPRECATED. Helm repository credentials are now managed using RepoCredentials
@@ -345,55 +398,79 @@ func (mgr *SettingsManager) GetHelmRepositories() ([]HelmRepoCredentials, error)
 	return helmRepositories, nil
 }
 
-func (mgr *SettingsManager) GetRepositories() ([]RepoCredentials, error) {
-	argoCDCM, err := mgr.getConfigMap()
-	if err != nil {
-		return nil, err
-	}
-	repositories := make([]RepoCredentials, 0)
-	repositoriesStr := argoCDCM.Data[repositoriesKey]
-	if repositoriesStr != "" {
-		err := yaml.Unmarshal([]byte(repositoriesStr), &repositories)
+func (mgr *SettingsManager) GetRepositories() ([]Repository, error) {
+	if mgr.reposCache == nil {
+		argoCDCM, err := mgr.getConfigMap()
 		if err != nil {
 			return nil, err
 		}
-	}
-	return repositories, nil
-}
 
-func (mgr *SettingsManager) SaveRepositories(repos []RepoCredentials) error {
-	argoCDCM, err := mgr.getConfigMap()
-	if err != nil {
-		return err
-	}
-	if len(repos) > 0 {
-		yamlStr, err := yaml.Marshal(repos)
-		if err != nil {
-			return err
+		mgr.mutex.Lock()
+		defer mgr.mutex.Unlock()
+		repositories := make([]Repository, 0)
+		repositoriesStr := argoCDCM.Data[repositoriesKey]
+		if repositoriesStr != "" {
+			err := yaml.Unmarshal([]byte(repositoriesStr), &repositories)
+			if err != nil {
+				return nil, err
+			}
 		}
-		argoCDCM.Data[repositoriesKey] = string(yamlStr)
-	} else {
-		delete(argoCDCM.Data, repositoriesKey)
+		mgr.reposCache = repositories
 	}
-	_, err = mgr.clientset.CoreV1().ConfigMaps(mgr.namespace).Update(argoCDCM)
-	return err
+
+	return mgr.reposCache, nil
 }
 
-func (mgr *SettingsManager) GetRepositoryCredentials() ([]RepoCredentials, error) {
-	argoCDCM, err := mgr.getConfigMap()
-	if err != nil {
-		return nil, err
-	}
+func (mgr *SettingsManager) SaveRepositories(repos []Repository) error {
+	return mgr.updateConfigMap(func(argoCDCM *apiv1.ConfigMap) error {
+		if len(repos) > 0 {
+			yamlStr, err := yaml.Marshal(repos)
+			if err != nil {
+				return err
+			}
+			argoCDCM.Data[repositoriesKey] = string(yamlStr)
+		} else {
+			delete(argoCDCM.Data, repositoriesKey)
+		}
+		return nil
+	})
+}
 
-	repositoryCredentials := make([]RepoCredentials, 0)
-	repositoryCredentialsStr := argoCDCM.Data[repositoryCredentialsKey]
-	if repositoryCredentialsStr != "" {
-		err := yaml.Unmarshal([]byte(repositoryCredentialsStr), &repositoryCredentials)
+func (mgr *SettingsManager) SaveRepositoryCredentials(creds []RepositoryCredentials) error {
+	return mgr.updateConfigMap(func(argoCDCM *apiv1.ConfigMap) error {
+		if len(creds) > 0 {
+			yamlStr, err := yaml.Marshal(creds)
+			if err != nil {
+				return err
+			}
+			argoCDCM.Data[repositoryCredentialsKey] = string(yamlStr)
+		} else {
+			delete(argoCDCM.Data, repositoryCredentialsKey)
+		}
+		return nil
+	})
+}
+
+func (mgr *SettingsManager) GetRepositoryCredentials() ([]RepositoryCredentials, error) {
+	if mgr.repoCredsCache == nil {
+		argoCDCM, err := mgr.getConfigMap()
 		if err != nil {
 			return nil, err
 		}
+
+		mgr.mutex.Lock()
+		defer mgr.mutex.Unlock()
+		creds := make([]RepositoryCredentials, 0)
+		credsStr := argoCDCM.Data[repositoryCredentialsKey]
+		if credsStr != "" {
+			err := yaml.Unmarshal([]byte(credsStr), &creds)
+			if err != nil {
+				return nil, err
+			}
+		}
+		mgr.repoCredsCache = creds
 	}
-	return repositoryCredentials, nil
+	return mgr.repoCredsCache, nil
 }
 
 func (mgr *SettingsManager) GetGoogleAnalytics() (*GoogleAnalytics, error) {
@@ -448,15 +525,31 @@ func (mgr *SettingsManager) GetSettings() (*ArgoCDSettings, error) {
 	return &settings, nil
 }
 
+// Clears cached settings on configmap/secret change
+func (mgr *SettingsManager) invalidateCache() {
+	mgr.mutex.Lock()
+	defer mgr.mutex.Unlock()
+
+	mgr.reposCache = nil
+	mgr.repoCredsCache = nil
+}
+
 func (mgr *SettingsManager) initialize(ctx context.Context) error {
 	tweakConfigMap := func(options *metav1.ListOptions) {
-		//cmFieldSelector := fields.ParseSelectorOrDie(fmt.Sprintf("metadata.name=%s", common.ArgoCDConfigMapName))
 		cmLabelSelector := fields.ParseSelectorOrDie("app.kubernetes.io/part-of=argocd")
 		options.LabelSelector = cmLabelSelector.String()
 	}
 
-	cmInformer := v1.NewFilteredConfigMapInformer(mgr.clientset, mgr.namespace, 3*time.Minute, cache.Indexers{}, tweakConfigMap)
-	secretsInformer := v1.NewSecretInformer(mgr.clientset, mgr.namespace, 3*time.Minute, cache.Indexers{})
+	eventHandler := cache.ResourceEventHandlerFuncs{
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			mgr.invalidateCache()
+		},
+	}
+	indexers := cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}
+	cmInformer := v1.NewFilteredConfigMapInformer(mgr.clientset, mgr.namespace, 3*time.Minute, indexers, tweakConfigMap)
+	secretsInformer := v1.NewSecretInformer(mgr.clientset, mgr.namespace, 3*time.Minute, indexers)
+	cmInformer.AddEventHandler(eventHandler)
+	secretsInformer.AddEventHandler(eventHandler)
 
 	log.Info("Starting configmap/secret informers")
 	go func() {
@@ -528,6 +621,7 @@ func updateSettingsFromConfigMap(settings *ArgoCDSettings, argoCDCM *apiv1.Confi
 	settings.DexConfig = argoCDCM.Data[settingDexConfigKey]
 	settings.OIDCConfigRAW = argoCDCM.Data[settingsOIDCConfigKey]
 	settings.URL = argoCDCM.Data[settingURLKey]
+	settings.KustomizeBuildOptions = argoCDCM.Data[kustomizeBuildOptionsKey]
 	settings.StatusBadgeEnabled = argoCDCM.Data[statusBadgeEnabledKey] == "true"
 	settings.AnonymousUserEnabled = argoCDCM.Data[anonymousUserEnabledKey] == "true"
 }
@@ -592,49 +686,25 @@ func updateSettingsFromSecret(settings *ArgoCDSettings, argoCDSecret *apiv1.Secr
 
 // SaveSettings serializes ArgoCDSettings and upserts it into K8s secret/configmap
 func (mgr *SettingsManager) SaveSettings(settings *ArgoCDSettings) error {
-	err := mgr.ensureSynced(false)
-	if err != nil {
-		return err
-	}
-
-	// Upsert the config data
-	argoCDCM, err := mgr.configmaps.ConfigMaps(mgr.namespace).Get(common.ArgoCDConfigMapName)
-	createCM := false
-	if err != nil {
-		if !apierr.IsNotFound(err) {
-			return err
+	err := mgr.updateConfigMap(func(argoCDCM *apiv1.ConfigMap) error {
+		if settings.URL != "" {
+			argoCDCM.Data[settingURLKey] = settings.URL
+		} else {
+			delete(argoCDCM.Data, settingURLKey)
 		}
-		argoCDCM = &apiv1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: common.ArgoCDConfigMapName,
-			},
+		if settings.DexConfig != "" {
+			argoCDCM.Data[settingDexConfigKey] = settings.DexConfig
+		} else {
+			delete(argoCDCM.Data, settings.DexConfig)
 		}
-		createCM = true
-	}
-	if argoCDCM.Data == nil {
-		argoCDCM.Data = make(map[string]string)
-	}
-	if settings.URL != "" {
-		argoCDCM.Data[settingURLKey] = settings.URL
-	} else {
-		delete(argoCDCM.Data, settingURLKey)
-	}
-	if settings.DexConfig != "" {
-		argoCDCM.Data[settingDexConfigKey] = settings.DexConfig
-	} else {
-		delete(argoCDCM.Data, settings.DexConfig)
-	}
-	if settings.OIDCConfigRAW != "" {
-		argoCDCM.Data[settingsOIDCConfigKey] = settings.OIDCConfigRAW
-	} else {
-		delete(argoCDCM.Data, settingsOIDCConfigKey)
-	}
+		if settings.OIDCConfigRAW != "" {
+			argoCDCM.Data[settingsOIDCConfigKey] = settings.OIDCConfigRAW
+		} else {
+			delete(argoCDCM.Data, settingsOIDCConfigKey)
+		}
+		return nil
+	})
 
-	if createCM {
-		_, err = mgr.clientset.CoreV1().ConfigMaps(mgr.namespace).Create(argoCDCM)
-	} else {
-		_, err = mgr.clientset.CoreV1().ConfigMaps(mgr.namespace).Update(argoCDCM)
-	}
 	if err != nil {
 		return err
 	}

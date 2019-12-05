@@ -10,9 +10,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/ghodss/yaml"
-
 	argoexec "github.com/argoproj/pkg/exec"
+	"github.com/ghodss/yaml"
 
 	"github.com/argoproj/argo-cd/util/config"
 )
@@ -89,6 +88,7 @@ func (h *helm) Dispose() {
 func Version() (string, error) {
 	cmd := exec.Command("helm", "version", "--client")
 	out, err := argoexec.RunCommandExt(cmd, argoexec.CmdOpts{
+		Timeout:  config.CmdOpts().Timeout,
 		Redactor: redactor,
 	})
 	if err != nil {
@@ -138,12 +138,17 @@ func (h *helm) GetParameters(valuesFiles []string) (map[string]string, error) {
 	return output, nil
 }
 
-func flatVals(input map[string]interface{}, output map[string]string, prefixes ...string) {
-	for key, val := range input {
-		if subMap, ok := val.(map[string]interface{}); ok {
-			flatVals(subMap, output, append(prefixes, fmt.Sprintf("%v", key))...)
-		} else {
-			output[strings.Join(append(prefixes, fmt.Sprintf("%v", key)), ".")] = fmt.Sprintf("%v", val)
+func flatVals(input interface{}, output map[string]string, prefixes ...string) {
+	switch i := input.(type) {
+	case map[string]interface{}:
+		for k, v := range i {
+			flatVals(v, output, append(prefixes, k)...)
 		}
+	case []interface{}:
+		for j, v := range i {
+			flatVals(v, output, append(prefixes[0:len(prefixes)-1], fmt.Sprintf("%s[%v]", prefixes[len(prefixes)-1], j))...)
+		}
+	default:
+		output[strings.Join(prefixes, ".")] = fmt.Sprintf("%v", i)
 	}
 }

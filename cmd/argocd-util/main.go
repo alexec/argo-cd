@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"regexp"
 	"syscall"
 
 	"github.com/ghodss/yaml"
@@ -108,7 +109,7 @@ func NewRunDexCommand() *cobra.Command {
 				} else {
 					err = ioutil.WriteFile("/tmp/dex.yaml", dexCfgBytes, 0644)
 					errors.CheckError(err)
-					log.Info(string(dexCfgBytes))
+					log.Info(redactor(string(dexCfgBytes)))
 					cmd = exec.Command("dex", "serve", "/tmp/dex.yaml")
 					cmd.Stdout = os.Stdout
 					cmd.Stderr = os.Stderr
@@ -427,11 +428,37 @@ func getReferencedSecrets(un unstructured.Unstructured) map[string]bool {
 	err := runtime.DefaultUnstructuredConverter.FromUnstructured(un.Object, &cm)
 	errors.CheckError(err)
 	referencedSecrets := make(map[string]bool)
+
+	// Referenced repository secrets
 	if reposRAW, ok := cm.Data["repositories"]; ok {
-		repoCreds := make([]settings.RepoCredentials, 0)
-		err := yaml.Unmarshal([]byte(reposRAW), &repoCreds)
+		repos := make([]settings.Repository, 0)
+		err := yaml.Unmarshal([]byte(reposRAW), &repos)
 		errors.CheckError(err)
-		for _, cred := range repoCreds {
+		for _, cred := range repos {
+			if cred.PasswordSecret != nil {
+				referencedSecrets[cred.PasswordSecret.Name] = true
+			}
+			if cred.SSHPrivateKeySecret != nil {
+				referencedSecrets[cred.SSHPrivateKeySecret.Name] = true
+			}
+			if cred.UsernameSecret != nil {
+				referencedSecrets[cred.UsernameSecret.Name] = true
+			}
+			if cred.TLSClientCertDataSecret != nil {
+				referencedSecrets[cred.TLSClientCertDataSecret.Name] = true
+			}
+			if cred.TLSClientCertKeySecret != nil {
+				referencedSecrets[cred.TLSClientCertKeySecret.Name] = true
+			}
+		}
+	}
+
+	// Referenced repository credentials secrets
+	if reposRAW, ok := cm.Data["repository.credentials"]; ok {
+		creds := make([]settings.RepositoryCredentials, 0)
+		err := yaml.Unmarshal([]byte(reposRAW), &creds)
+		errors.CheckError(err)
+		for _, cred := range creds {
 			if cred.PasswordSecret != nil {
 				referencedSecrets[cred.PasswordSecret.Name] = true
 			}
@@ -530,6 +557,11 @@ func NewClusterConfig() *cobra.Command {
 	}
 	clientConfig = cli.AddKubectlFlagsToCmd(command)
 	return command
+}
+
+func redactor(dirtyString string) string {
+	dirtyString = regexp.MustCompile("(clientSecret: )[^ \n]*").ReplaceAllString(dirtyString, "$1********")
+	return regexp.MustCompile("(secret: )[^ \n]*").ReplaceAllString(dirtyString, "$1********")
 }
 
 func main() {

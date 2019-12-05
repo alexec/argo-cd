@@ -14,9 +14,9 @@ import (
 
 	"github.com/argoproj/argo-cd/pkg/apiclient/cluster"
 	appv1 "github.com/argoproj/argo-cd/pkg/apis/application/v1alpha1"
+	servercache "github.com/argoproj/argo-cd/server/cache"
 	"github.com/argoproj/argo-cd/server/rbacpolicy"
 	"github.com/argoproj/argo-cd/util"
-	"github.com/argoproj/argo-cd/util/cache"
 	"github.com/argoproj/argo-cd/util/clusterauth"
 	"github.com/argoproj/argo-cd/util/db"
 	"github.com/argoproj/argo-cd/util/kube"
@@ -27,12 +27,12 @@ import (
 type Server struct {
 	db      db.ArgoDB
 	enf     *rbac.Enforcer
-	cache   *cache.Cache
+	cache   *servercache.Cache
 	kubectl kube.Kubectl
 }
 
 // NewServer returns a new instance of the Cluster service
-func NewServer(db db.ArgoDB, enf *rbac.Enforcer, cache *cache.Cache, kubectl kube.Kubectl) *Server {
+func NewServer(db db.ArgoDB, enf *rbac.Enforcer, cache *servercache.Cache, kubectl kube.Kubectl) *Server {
 	return &Server{
 		db:      db,
 		enf:     enf,
@@ -41,37 +41,38 @@ func NewServer(db db.ArgoDB, enf *rbac.Enforcer, cache *cache.Cache, kubectl kub
 	}
 }
 
-func (s *Server) getConnectionState(cluster appv1.Cluster, errorMessage string) appv1.ConnectionState {
-	if connectionState, err := s.cache.GetClusterConnectionState(cluster.Server); err == nil {
-		return connectionState
+func (s *Server) getConnectionState(cluster appv1.Cluster, errorMessage string) (appv1.ConnectionState, string) {
+	if clusterInfo, err := s.cache.GetClusterInfo(cluster.Server); err == nil {
+		return clusterInfo.ConnectionState, clusterInfo.Version
 	}
 	now := v1.Now()
-	connectionState := appv1.ConnectionState{
-		Status:     appv1.ConnectionStatusSuccessful,
-		ModifiedAt: &now,
+	clusterInfo := servercache.ClusterInfo{
+		ConnectionState: appv1.ConnectionState{
+			Status:     appv1.ConnectionStatusSuccessful,
+			ModifiedAt: &now,
+		},
 	}
 
 	config := cluster.RESTConfig()
 	config.Timeout = time.Second
-	kubeClientset, err := kubernetes.NewForConfig(config)
-	if err == nil {
-		_, err = kubeClientset.Discovery().ServerVersion()
-	}
+	version, err := s.kubectl.GetServerVersion(config)
 	if err != nil {
-		connectionState.Status = appv1.ConnectionStatusFailed
-		connectionState.Message = fmt.Sprintf("Unable to connect to cluster: %v", err)
+		clusterInfo.Status = appv1.ConnectionStatusFailed
+		clusterInfo.Message = fmt.Sprintf("Unable to connect to cluster: %v", err)
+	} else {
+		clusterInfo.Version = version
 	}
 
 	if errorMessage != "" {
-		connectionState.Status = appv1.ConnectionStatusFailed
-		connectionState.Message = fmt.Sprintf("%s %s", errorMessage, connectionState.Message)
+		clusterInfo.Status = appv1.ConnectionStatusFailed
+		clusterInfo.Message = fmt.Sprintf("%s %s", errorMessage, clusterInfo.Message)
 	}
 
-	err = s.cache.SetClusterConnectionState(cluster.Server, &connectionState)
+	err = s.cache.SetClusterInfo(cluster.Server, &clusterInfo)
 	if err != nil {
-		log.Warnf("getConnectionState cache set error %s: %v", cluster.Server, err)
+		log.Warnf("getClusterInfo cache set error %s: %v", cluster.Server, err)
 	}
-	return connectionState
+	return clusterInfo.ConnectionState, clusterInfo.Version
 }
 
 // List returns list of clusters
@@ -100,11 +101,9 @@ func (s *Server) List(ctx context.Context, q *cluster.ClusterQuery) (*appv1.Clus
 			warningMessage = fmt.Sprintf("There are %d credentials configured this cluster.", len(clusters))
 		}
 		if clust.ConnectionState.Status == "" {
-			clust.ConnectionState = s.getConnectionState(clust, warningMessage)
-		}
-		clust.ServerVersion, err = s.kubectl.GetServerVersion(clust.RESTConfig())
-		if err != nil {
-			return err
+			state, serverVersion := s.getConnectionState(clust, warningMessage)
+			clust.ConnectionState = state
+			clust.ServerVersion = serverVersion
 		}
 		items[i] = *redact(&clust)
 		return nil

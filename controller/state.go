@@ -63,7 +63,6 @@ type AppStateManager interface {
 }
 
 type comparisonResult struct {
-	reconciledAt     metav1.Time
 	syncStatus       *v1alpha1.SyncStatus
 	healthStatus     *v1alpha1.HealthStatus
 	resources        []v1alpha1.ResourceStatus
@@ -71,6 +70,16 @@ type comparisonResult struct {
 	hooks            []*unstructured.Unstructured
 	diffNormalizer   diff.Normalizer
 	appSourceType    v1alpha1.ApplicationSourceType
+}
+
+func (cr *comparisonResult) targetObjs() []*unstructured.Unstructured {
+	objs := cr.hooks
+	for _, r := range cr.managedResources {
+		if r.Target != nil {
+			objs = append(objs, r.Target)
+		}
+	}
+	return objs
 }
 
 // appStateManager allows to compare applications to git
@@ -119,11 +128,7 @@ func (m *appStateManager) getRepoObjs(app *v1alpha1.Application, source v1alpha1
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	cluster, err := m.db.GetCluster(context.Background(), app.Spec.Destination.Server)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	cluster.ServerVersion, err = m.kubectl.GetServerVersion(cluster.RESTConfig())
+	serverVersion, err := m.liveStateCache.GetServerVersion(app.Spec.Destination.Server)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -140,7 +145,7 @@ func (m *appStateManager) getRepoObjs(app *v1alpha1.Application, source v1alpha1
 		KustomizeOptions: &appv1.KustomizeOptions{
 			BuildOptions: buildOptions,
 		},
-		KubeVersion: cluster.ServerVersion,
+		KubeVersion: serverVersion,
 	})
 	if err != nil {
 		return nil, nil, nil, err
@@ -198,9 +203,11 @@ func DeduplicateTargetObjects(
 	result := make([]*unstructured.Unstructured, 0)
 	for key, targets := range targetByKey {
 		if len(targets) > 1 {
+			now := metav1.Now()
 			conditions = append(conditions, appv1.ApplicationCondition{
-				Type:    appv1.ApplicationConditionRepeatedResourceWarning,
-				Message: fmt.Sprintf("Resource %s appeared %d times among application resources.", key.String(), len(targets)),
+				Type:               appv1.ApplicationConditionRepeatedResourceWarning,
+				Message:            fmt.Sprintf("Resource %s appeared %d times among application resources.", key.String(), len(targets)),
+				LastTransitionTime: &now,
 			})
 		}
 		result = append(result, targets[len(targets)-1])
@@ -265,13 +272,11 @@ func (m *appStateManager) getComparisonSettings(app *appv1.Application) (string,
 // revision and supplied source. If revision or overrides are empty, then compares against
 // revision and overrides in the app spec.
 func (m *appStateManager) CompareAppState(app *v1alpha1.Application, revision string, source v1alpha1.ApplicationSource, noCache bool, localManifests []string) *comparisonResult {
-	reconciledAt := metav1.Now()
 	appLabelKey, resourceOverrides, diffNormalizer, err := m.getComparisonSettings(app)
 
 	// return unknown comparison result if basic comparison settings cannot be loaded
 	if err != nil {
 		return &comparisonResult{
-			reconciledAt: reconciledAt,
 			syncStatus: &v1alpha1.SyncStatus{
 				ComparedTo: appv1.ComparedTo{Source: source, Destination: app.Spec.Destination},
 				Status:     appv1.SyncStatusCodeUnknown,
@@ -290,19 +295,20 @@ func (m *appStateManager) CompareAppState(app *v1alpha1.Application, revision st
 	var targetObjs []*unstructured.Unstructured
 	var hooks []*unstructured.Unstructured
 	var manifestInfo *apiclient.ManifestResponse
+	now := metav1.Now()
 
 	if len(localManifests) == 0 {
 		targetObjs, hooks, manifestInfo, err = m.getRepoObjs(app, source, appLabelKey, revision, noCache)
 		if err != nil {
 			targetObjs = make([]*unstructured.Unstructured, 0)
-			conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error()})
+			conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error(), LastTransitionTime: &now})
 			failedToLoadObjs = true
 		}
 	} else {
 		targetObjs, hooks, err = unmarshalManifests(localManifests)
 		if err != nil {
 			targetObjs = make([]*unstructured.Unstructured, 0)
-			conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error()})
+			conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error(), LastTransitionTime: &now})
 			failedToLoadObjs = true
 		}
 		manifestInfo = nil
@@ -310,13 +316,13 @@ func (m *appStateManager) CompareAppState(app *v1alpha1.Application, revision st
 
 	targetObjs, dedupConditions, err := DeduplicateTargetObjects(app.Spec.Destination.Server, app.Spec.Destination.Namespace, targetObjs, m.liveStateCache)
 	if err != nil {
-		conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error()})
+		conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error(), LastTransitionTime: &now})
 	}
 	conditions = append(conditions, dedupConditions...)
 
 	resFilter, err := m.settingsMgr.GetResourcesFilter()
 	if err != nil {
-		conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error()})
+		conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error(), LastTransitionTime: &now})
 	} else {
 		for i := len(targetObjs) - 1; i >= 0; i-- {
 			targetObj := targetObjs[i]
@@ -324,8 +330,9 @@ func (m *appStateManager) CompareAppState(app *v1alpha1.Application, revision st
 			if resFilter.IsExcludedResource(gvk.Group, gvk.Kind, app.Spec.Destination.Server) {
 				targetObjs = append(targetObjs[:i], targetObjs[i+1:]...)
 				conditions = append(conditions, v1alpha1.ApplicationCondition{
-					Type:    v1alpha1.ApplicationConditionExcludedResourceWarning,
-					Message: fmt.Sprintf("Resource %s/%s %s is excluded in the settings", gvk.Group, gvk.Kind, targetObj.GetName()),
+					Type:               v1alpha1.ApplicationConditionExcludedResourceWarning,
+					Message:            fmt.Sprintf("Resource %s/%s %s is excluded in the settings", gvk.Group, gvk.Kind, targetObj.GetName()),
+					LastTransitionTime: &now,
 				})
 			}
 		}
@@ -336,7 +343,7 @@ func (m *appStateManager) CompareAppState(app *v1alpha1.Application, revision st
 	dedupLiveResources(targetObjs, liveObjByKey)
 	if err != nil {
 		liveObjByKey = make(map[kubeutil.ResourceKey]*unstructured.Unstructured)
-		conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error()})
+		conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error(), LastTransitionTime: &now})
 		failedToLoadObjs = true
 	}
 	logCtx.Debugf("Retrieved lived manifests")
@@ -345,8 +352,9 @@ func (m *appStateManager) CompareAppState(app *v1alpha1.Application, revision st
 			appInstanceName := kubeutil.GetAppInstanceLabel(liveObj, appLabelKey)
 			if appInstanceName != "" && appInstanceName != app.Name {
 				conditions = append(conditions, v1alpha1.ApplicationCondition{
-					Type:    v1alpha1.ApplicationConditionSharedResourceWarning,
-					Message: fmt.Sprintf("%s/%s is part of a different application: %s", liveObj.GetKind(), liveObj.GetName(), appInstanceName),
+					Type:               v1alpha1.ApplicationConditionSharedResourceWarning,
+					Message:            fmt.Sprintf("%s/%s is part of a different application: %s", liveObj.GetKind(), liveObj.GetName(), appInstanceName),
+					LastTransitionTime: &now,
 				})
 			}
 		}
@@ -381,7 +389,7 @@ func (m *appStateManager) CompareAppState(app *v1alpha1.Application, revision st
 	if err != nil {
 		diffResults = &diff.DiffResultList{}
 		failedToLoadObjs = true
-		conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error()})
+		conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error(), LastTransitionTime: &now})
 	}
 
 	syncCode := v1alpha1.SyncStatusCodeSynced
@@ -425,6 +433,10 @@ func (m *appStateManager) CompareAppState(app *v1alpha1.Application, revision st
 		} else {
 			resState.Status = v1alpha1.SyncStatusCodeSynced
 		}
+		// we can't say anything about the status if we were unable to get the target objects
+		if failedToLoadObjs {
+			resState.Status = v1alpha1.SyncStatusCodeUnknown
+		}
 		managedResources[i] = managedResource{
 			Name:      resState.Name,
 			Namespace: resState.Namespace,
@@ -458,11 +470,10 @@ func (m *appStateManager) CompareAppState(app *v1alpha1.Application, revision st
 	})
 
 	if err != nil {
-		conditions = append(conditions, appv1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error()})
+		conditions = append(conditions, appv1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error(), LastTransitionTime: &now})
 	}
 
 	compRes := comparisonResult{
-		reconciledAt:     reconciledAt,
 		syncStatus:       &syncStatus,
 		healthStatus:     healthStatus,
 		resources:        resourceSummaries,

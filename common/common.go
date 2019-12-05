@@ -21,9 +21,10 @@ const (
 	ArgoCDTLSCertsConfigMapName = "argocd-tls-certs-cm"
 )
 
-// Default system namespace
+// Some default configurables
 const (
 	DefaultSystemNamespace = "kube-system"
+	DefaultRepoType        = "git"
 )
 
 // Default listener ports for ArgoCD components
@@ -135,6 +136,8 @@ const (
 	EnvVarTLSDataPath = "ARGOCD_TLS_DATA_PATH"
 	// Specifies number of git remote operations attempts count
 	EnvGitAttemptsCount = "ARGOCD_GIT_ATTEMPTS_COUNT"
+	// Overrides git submodule support, true by default
+	EnvGitSubmoduleEnabled = "ARGOCD_GIT_MODULES_ENABLED"
 )
 
 const (

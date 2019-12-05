@@ -1,4 +1,5 @@
 # Contributing
+
 ## Before You Start
 
 You must install and run the ArgoCD using a local Kubernetes (e.g. Docker for Desktop or Minikube) first. This will help you understand the application, but also get your local environment set-up.
@@ -21,17 +22,17 @@ Install:
 * [minikube](https://kubernetes.io/docs/setup/minikube/) or Docker for Desktop
 
 Brew users can quickly install the lot:
-    
+
 ```bash
-brew install go git-lfs kubectl kubectx dep ksonnet/tap/ks kubernetes-helm kustomize kustomize
+brew install go git-lfs kubectl kubectx dep ksonnet/tap/ks kubernetes-helm kustomize
 ```
 
 Check the versions:
 
-```
+```bash
 go version ;# must be v1.12.x
 helm version ;# must be v2.13.x
-kustomize version ;# must be v3.10.x
+kustomize version ;# must be v3.1.x
 ```
 
 Set up environment variables (e.g. is `~/.bashrc`):
@@ -54,8 +55,10 @@ Ensure dependencies are up to date first:
 
 ```shell
 dep ensure
-make dev-builder-image
+make dev-tools-image
 make install-lint-tools
+go get github.com/mattn/goreman
+go get github.com/jstemmer/go-junit-report
 ```
 
 Common make targets:
@@ -84,7 +87,7 @@ kubectl -n argocd scale deployment/argocd-redis --replicas 0
 Download Yarn dependencies and Compile:
 
 ```bash
-~/go/src/github.com/argoproj/argo-cd/ui 
+~/go/src/github.com/argoproj/argo-cd/ui
 yarn install
 yarn build
 ```
@@ -102,7 +105,7 @@ You can now execute `argocd` command against your locally running ArgoCD by appe
 argocd app create guestbook --path guestbook --repo https://github.com/argoproj/argocd-example-apps.git --dest-server https://kubernetes.default.svc  --dest-namespace default --server localhost:8080 --plaintext --insecure
 ```
 
-You can open the UI: http://localhost:4000
+You can open the UI: [http://localhost:4000](http://localhost:4000)
 
 As an alternative to using the above command line parameters each time you call `argocd` CLI, you can set the following environment variables:
 

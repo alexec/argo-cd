@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Masterminds/semver"
 	jsonpatch "github.com/evanphx/json-patch"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
@@ -30,14 +31,15 @@ import (
 	appv1 "github.com/argoproj/argo-cd/pkg/apis/application/v1alpha1"
 	appclientset "github.com/argoproj/argo-cd/pkg/client/clientset/versioned"
 	"github.com/argoproj/argo-cd/reposerver/apiclient"
+	servercache "github.com/argoproj/argo-cd/server/cache"
 	"github.com/argoproj/argo-cd/server/rbacpolicy"
 	"github.com/argoproj/argo-cd/util"
 	"github.com/argoproj/argo-cd/util/argo"
 	argoutil "github.com/argoproj/argo-cd/util/argo"
-	"github.com/argoproj/argo-cd/util/cache"
 	"github.com/argoproj/argo-cd/util/db"
 	"github.com/argoproj/argo-cd/util/diff"
 	"github.com/argoproj/argo-cd/util/git"
+	"github.com/argoproj/argo-cd/util/helm"
 	"github.com/argoproj/argo-cd/util/kube"
 	"github.com/argoproj/argo-cd/util/lua"
 	"github.com/argoproj/argo-cd/util/rbac"
@@ -57,7 +59,7 @@ type Server struct {
 	projectLock   *util.KeyLock
 	auditLogger   *argo.AuditLogger
 	settingsMgr   *settings.SettingsManager
-	cache         *cache.Cache
+	cache         *servercache.Cache
 }
 
 // NewServer returns a new instance of the Application service
@@ -66,7 +68,7 @@ func NewServer(
 	kubeclientset kubernetes.Interface,
 	appclientset appclientset.Interface,
 	repoClientset apiclient.Clientset,
-	cache *cache.Cache,
+	cache *servercache.Cache,
 	kubectl kube.Kubectl,
 	db db.ArgoDB,
 	enf *rbac.Enforcer,
@@ -94,16 +96,9 @@ func appRBACName(app appv1.Application) string {
 	return fmt.Sprintf("%s/%s", app.Spec.GetProject(), app.Name)
 }
 
-func validatedSelector(selector string) string {
-	if _, err := fields.ParseSelector(selector); err != nil {
-		return ""
-	}
-	return selector
-}
-
 // List returns list of applications
 func (s *Server) List(ctx context.Context, q *application.ApplicationQuery) (*appv1.ApplicationList, error) {
-	appList, err := s.appclientset.ArgoprojV1alpha1().Applications(s.ns).List(metav1.ListOptions{LabelSelector: validatedSelector(q.Selector)})
+	appList, err := s.appclientset.ArgoprojV1alpha1().Applications(s.ns).List(metav1.ListOptions{LabelSelector: q.Selector})
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +153,7 @@ func (s *Server) Create(ctx context.Context, q *application.ApplicationCreateReq
 	}
 
 	if err == nil {
-		s.logEvent(out, ctx, argo.EventReasonResourceCreated, "created application")
+		s.logAppEvent(out, ctx, argo.EventReasonResourceCreated, "created application")
 	}
 	return out, err
 }
@@ -324,7 +319,7 @@ func (s *Server) Update(ctx context.Context, q *application.ApplicationUpdateReq
 	}
 	out, err := s.appclientset.ArgoprojV1alpha1().Applications(s.ns).Update(a)
 	if err == nil {
-		s.logEvent(a, ctx, argo.EventReasonResourceUpdated, "updated application")
+		s.logAppEvent(a, ctx, argo.EventReasonResourceUpdated, "updated application")
 	}
 	return out, err
 }
@@ -352,7 +347,7 @@ func (s *Server) UpdateSpec(ctx context.Context, q *application.ApplicationUpdat
 		a.Spec = *normalizedSpec
 		_, err = s.appclientset.ArgoprojV1alpha1().Applications(s.ns).Update(a)
 		if err == nil {
-			s.logEvent(a, ctx, argo.EventReasonResourceUpdated, "updated application spec")
+			s.logAppEvent(a, ctx, argo.EventReasonResourceUpdated, "updated application spec")
 			return normalizedSpec, nil
 		}
 		if !apierr.IsConflict(err) {
@@ -404,7 +399,7 @@ func (s *Server) Patch(ctx context.Context, q *application.ApplicationPatchReque
 		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("Patch type '%s' is not supported", q.PatchType))
 	}
 
-	s.logEvent(app, ctx, argo.EventReasonResourceUpdated, fmt.Sprintf("patched application %s/%s", app.Namespace, app.Name))
+	s.logAppEvent(app, ctx, argo.EventReasonResourceUpdated, fmt.Sprintf("patched application %s/%s", app.Namespace, app.Name))
 
 	err = json.Unmarshal(patchApp, &app)
 	if err != nil {
@@ -469,7 +464,7 @@ func (s *Server) Delete(ctx context.Context, q *application.ApplicationDeleteReq
 		return nil, err
 	}
 
-	s.logEvent(a, ctx, argo.EventReasonResourceDeleted, "deleted application")
+	s.logAppEvent(a, ctx, argo.EventReasonResourceDeleted, "deleted application")
 	return &application.ApplicationResponse{}, nil
 }
 
@@ -497,7 +492,7 @@ func (s *Server) Watch(q *application.ApplicationQuery, ws application.Applicati
 		return nil
 	}
 
-	listOpts := metav1.ListOptions{LabelSelector: validatedSelector(q.Selector)}
+	listOpts := metav1.ListOptions{LabelSelector: q.Selector}
 	if q.Name != nil && *q.Name != "" {
 		listOpts.FieldSelector = fmt.Sprintf("metadata.name=%s", *q.Name)
 	}
@@ -623,7 +618,7 @@ func (s *Server) getApplicationClusterConfig(applicationName string) (*rest.Conf
 // getCachedAppState loads the cached state and trigger app refresh if cache is missing
 func (s *Server) getCachedAppState(ctx context.Context, a *appv1.Application, getFromCache func() error) error {
 	err := getFromCache()
-	if err != nil && err == cache.ErrCacheMiss {
+	if err != nil && err == servercache.ErrCacheMiss {
 		conditions := a.Status.GetConditions(map[appv1.ApplicationConditionType]bool{
 			appv1.ApplicationConditionComparisonError:  true,
 			appv1.ApplicationConditionInvalidSpecError: true,
@@ -737,7 +732,7 @@ func (s *Server) PatchResource(ctx context.Context, q *application.ApplicationRe
 	if err != nil {
 		return nil, err
 	}
-	s.logEvent(a, ctx, argo.EventReasonResourceUpdated, fmt.Sprintf("patched resource %s/%s '%s'", q.Group, q.Kind, q.ResourceName))
+	s.logAppEvent(a, ctx, argo.EventReasonResourceUpdated, fmt.Sprintf("patched resource %s/%s '%s'", q.Group, q.Kind, q.ResourceName))
 	return &application.ApplicationResourceResponse{
 		Manifest: string(data),
 	}, nil
@@ -769,7 +764,7 @@ func (s *Server) DeleteResource(ctx context.Context, q *application.ApplicationR
 	if err != nil {
 		return nil, err
 	}
-	s.logEvent(a, ctx, argo.EventReasonResourceDeleted, fmt.Sprintf("deleted resource %s/%s '%s'", q.Group, q.Kind, q.ResourceName))
+	s.logAppEvent(a, ctx, argo.EventReasonResourceDeleted, fmt.Sprintf("deleted resource %s/%s '%s'", q.Group, q.Kind, q.ResourceName))
 	return &application.ApplicationResponse{}, nil
 }
 
@@ -951,14 +946,9 @@ func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncR
 			return nil, status.Errorf(codes.FailedPrecondition, "Cannot sync to %s: auto-sync currently set to %s", syncReq.Revision, a.Spec.Source.TargetRevision)
 		}
 	}
-
-	revision := a.Spec.Source.TargetRevision
-	displayRevision := revision
-	if !a.Spec.Source.IsHelm() {
-		revision, displayRevision, err = s.resolveRevision(ctx, a, syncReq)
-		if err != nil {
-			return nil, status.Errorf(codes.FailedPrecondition, err.Error())
-		}
+	revision, displayRevision, err := s.resolveRevision(ctx, a, syncReq)
+	if err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, err.Error())
 	}
 	op := appv1.Operation{
 		Sync: &appv1.SyncOperation{
@@ -976,7 +966,7 @@ func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncR
 		if len(syncReq.Resources) > 0 {
 			partial = "partial "
 		}
-		s.logEvent(a, ctx, argo.EventReasonOperationStarted, fmt.Sprintf("initiated %ssync to %s", partial, displayRevision))
+		s.logAppEvent(a, ctx, argo.EventReasonOperationStarted, fmt.Sprintf("initiated %ssync to %s", partial, displayRevision))
 	}
 	return a, err
 }
@@ -1025,7 +1015,7 @@ func (s *Server) Rollback(ctx context.Context, rollbackReq *application.Applicat
 	}
 	a, err = argo.SetAppOperation(appIf, *rollbackReq.Name, &op)
 	if err == nil {
-		s.logEvent(a, ctx, argo.EventReasonOperationStarted, fmt.Sprintf("initiated rollback to %d", rollbackReq.ID))
+		s.logAppEvent(a, ctx, argo.EventReasonOperationStarted, fmt.Sprintf("initiated rollback to %d", rollbackReq.ID))
 	}
 	return a, err
 }
@@ -1037,24 +1027,52 @@ func (s *Server) resolveRevision(ctx context.Context, app *appv1.Application, sy
 	if ambiguousRevision == "" {
 		ambiguousRevision = app.Spec.Source.TargetRevision
 	}
-	if git.IsCommitSHA(ambiguousRevision) {
-		// If it's already a commit SHA, then no need to look it up
-		return ambiguousRevision, ambiguousRevision, nil
+	var revision string
+	if app.Spec.Source.IsHelm() {
+		repo, err := s.db.GetRepository(ctx, app.Spec.Source.RepoURL)
+		if err != nil {
+			return "", "", err
+		}
+		if helm.IsVersion(ambiguousRevision) {
+			return ambiguousRevision, ambiguousRevision, nil
+		}
+		client := helm.NewClient(repo.Repo, repo.GetHelmCreds())
+		index, err := client.GetIndex()
+		if err != nil {
+			return "", "", err
+		}
+		entries, err := index.GetEntries(app.Spec.Source.Chart)
+		if err != nil {
+			return "", "", err
+		}
+		constraints, err := semver.NewConstraint(ambiguousRevision)
+		if err != nil {
+			return "", "", err
+		}
+		version, err := entries.MaxVersion(constraints)
+		if err != nil {
+			return "", "", err
+		}
+		return version.String(), fmt.Sprintf("%v (%v)", ambiguousRevision, version.String()), nil
+	} else {
+		if git.IsCommitSHA(ambiguousRevision) {
+			// If it's already a commit SHA, then no need to look it up
+			return ambiguousRevision, ambiguousRevision, nil
+		}
+		repo, err := s.db.GetRepository(ctx, app.Spec.Source.RepoURL)
+		if err != nil {
+			return "", "", err
+		}
+		gitClient, err := git.NewClient(repo.Repo, repo.GetGitCreds(), repo.IsInsecure(), repo.IsLFSEnabled())
+		if err != nil {
+			return "", "", err
+		}
+		revision, err = gitClient.LsRemote(ambiguousRevision)
+		if err != nil {
+			return "", "", err
+		}
+		return revision, fmt.Sprintf("%s (%s)", ambiguousRevision, revision), nil
 	}
-	repo, err := s.db.GetRepository(ctx, app.Spec.Source.RepoURL)
-	if err != nil {
-		return "", "", err
-	}
-	gitClient, err := git.NewClient(repo.Repo, repo.GetGitCreds(), repo.IsInsecure(), repo.IsLFSEnabled())
-	if err != nil {
-		return "", "", err
-	}
-	commitSHA, err := gitClient.LsRemote(ambiguousRevision)
-	if err != nil {
-		return "", "", err
-	}
-	displayRevision := fmt.Sprintf("%s (%s)", ambiguousRevision, commitSHA)
-	return commitSHA, displayRevision, nil
 }
 
 func (s *Server) TerminateOperation(ctx context.Context, termOpReq *application.OperationTerminateRequest) (*application.OperationTerminateResponse, error) {
@@ -1084,12 +1102,12 @@ func (s *Server) TerminateOperation(ctx context.Context, termOpReq *application.
 		if err != nil {
 			return nil, err
 		}
-		s.logEvent(a, ctx, argo.EventReasonResourceUpdated, "terminated running operation")
+		s.logAppEvent(a, ctx, argo.EventReasonResourceUpdated, "terminated running operation")
 	}
 	return nil, status.Errorf(codes.Internal, "Failed to terminate app. Too many conflicts")
 }
 
-func (s *Server) logEvent(a *appv1.Application, ctx context.Context, reason string, action string) {
+func (s *Server) logAppEvent(a *appv1.Application, ctx context.Context, reason string, action string) {
 	eventInfo := argo.EventInfo{Type: v1.EventTypeNormal, Reason: reason}
 	user := session.Username(ctx)
 	if user == "" {
@@ -1097,6 +1115,16 @@ func (s *Server) logEvent(a *appv1.Application, ctx context.Context, reason stri
 	}
 	message := fmt.Sprintf("%s %s", user, action)
 	s.auditLogger.LogAppEvent(a, eventInfo, message)
+}
+
+func (s *Server) logResourceEvent(res *appv1.ResourceNode, ctx context.Context, reason string, action string) {
+	eventInfo := argo.EventInfo{Type: v1.EventTypeNormal, Reason: reason}
+	user := session.Username(ctx)
+	if user == "" {
+		user = "Unknown user"
+	}
+	message := fmt.Sprintf("%s %s", user, action)
+	s.auditLogger.LogResourceEvent(res, eventInfo, message)
 }
 
 func (s *Server) ListResourceActions(ctx context.Context, q *application.ApplicationResourceRequest) (*application.ResourceActionsListResponse, error) {
@@ -1151,7 +1179,7 @@ func (s *Server) RunResourceAction(ctx context.Context, q *application.ResourceA
 		Group:        q.Group,
 	}
 	actionRequest := fmt.Sprintf("%s/%s/%s/%s", rbacpolicy.ActionAction, q.Group, q.Kind, q.Action)
-	res, config, _, err := s.getAppResource(ctx, actionRequest, resourceRequest)
+	res, config, a, err := s.getAppResource(ctx, actionRequest, resourceRequest)
 	if err != nil {
 		return nil, err
 	}
@@ -1177,6 +1205,9 @@ func (s *Server) RunResourceAction(ctx context.Context, q *application.ResourceA
 	if err != nil {
 		return nil, err
 	}
+
+	s.logAppEvent(a, ctx, argo.EventReasonResourceActionRan, fmt.Sprintf("ran action %s on resource %s/%s/%s", q.Action, res.Group, res.Kind, res.Name))
+	s.logResourceEvent(res, ctx, argo.EventReasonResourceActionRan, fmt.Sprintf("ran action %s", q.Action))
 
 	newObjBytes, err := json.Marshal(newObj)
 	if err != nil {

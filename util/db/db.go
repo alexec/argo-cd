@@ -18,11 +18,11 @@ type ArgoDB interface {
 	// WatchClusters allow watching for cluster events
 	WatchClusters(ctx context.Context, callback func(*ClusterEvent)) error
 	// Get returns a cluster from a query
-	GetCluster(ctx context.Context, name string) (*appv1.Cluster, error)
+	GetCluster(ctx context.Context, server string) (*appv1.Cluster, error)
 	// UpdateCluster updates a cluster
 	UpdateCluster(ctx context.Context, c *appv1.Cluster) (*appv1.Cluster, error)
 	// DeleteCluster deletes a cluster by name
-	DeleteCluster(ctx context.Context, name string) error
+	DeleteCluster(ctx context.Context, server string) error
 
 	// ListRepositories lists repositories
 	ListRepositories(ctx context.Context) ([]*appv1.Repository, error)
@@ -33,10 +33,21 @@ type ArgoDB interface {
 	GetRepository(ctx context.Context, url string) (*appv1.Repository, error)
 	// UpdateRepository updates a repository
 	UpdateRepository(ctx context.Context, r *appv1.Repository) (*appv1.Repository, error)
-	// DeleteRepository updates a repository
-	DeleteRepository(ctx context.Context, url string) error
+	// DeleteRepository deletes a repository from config
+	DeleteRepository(ctx context.Context, name string) error
 
-	// ListRepoCertificates lists all configured certificates
+	// ListRepoCredentials list all repo credential sets URL patterns
+	ListRepositoryCredentials(ctx context.Context) ([]string, error)
+	// GetRepoCredentials gets repo credentials for given URL
+	GetRepositoryCredentials(ctx context.Context, name string) (*appv1.RepoCreds, error)
+	// CreateRepoCredentials creates a repository credential set
+	CreateRepositoryCredentials(ctx context.Context, r *appv1.RepoCreds) (*appv1.RepoCreds, error)
+	// UpdateRepoCredentials updates a repository credential set
+	UpdateRepositoryCredentials(ctx context.Context, r *appv1.RepoCreds) (*appv1.RepoCreds, error)
+	// DeleteRepoCredentials deletes a repository credential set from config
+	DeleteRepositoryCredentials(ctx context.Context, name string) error
+
+	// ListRepoCerticifates lists all configured certificates
 	ListRepoCertificates(ctx context.Context, selector *CertificateListSelector) (*appv1.RepositoryCertificateList, error)
 	// CreateRepoCertificate creates a new certificate entry
 	CreateRepoCertificate(ctx context.Context, certificate *appv1.RepositoryCertificateList, upsert bool) (*appv1.RepositoryCertificateList, error)

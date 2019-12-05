@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc/codes"
@@ -68,6 +69,42 @@ func TestCreateRepository(t *testing.T) {
 	assert.Nil(t, secret.Data[sshPrivateKey])
 }
 
+func TestCreateRepoCredentials(t *testing.T) {
+	clientset := getClientset(nil)
+	db := NewDB(testNamespace, settings.NewSettingsManager(context.Background(), clientset, testNamespace), clientset)
+
+	creds, err := db.CreateRepositoryCredentials(context.Background(), &v1alpha1.RepoCreds{
+		URL:      "https://github.com/argoproj/",
+		Username: "test-username",
+		Password: "test-password",
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, "https://github.com/argoproj/", creds.URL)
+
+	secret, err := clientset.CoreV1().Secrets(testNamespace).Get(repoURLToSecretName(creds.URL), metav1.GetOptions{})
+	assert.Nil(t, err)
+
+	assert.Equal(t, common.AnnotationValueManagedByArgoCD, secret.Annotations[common.AnnotationKeyManagedBy])
+	assert.Equal(t, string(secret.Data[username]), "test-username")
+	assert.Equal(t, string(secret.Data[password]), "test-password")
+	assert.Nil(t, secret.Data[sshPrivateKey])
+
+	created, err := db.CreateRepository(context.Background(), &v1alpha1.Repository{
+		Repo: "https://github.com/argoproj/argo-cd",
+	})
+	assert.Nil(t, err)
+	assert.Equal(t, "https://github.com/argoproj/argo-cd", created.Repo)
+
+	// There seems to be a race or some other hiccup in the fake K8s clientset used for this test.
+	// Just give it a little time to settle.
+	time.Sleep(1 * time.Second)
+
+	repo, err := db.GetRepository(context.Background(), created.Repo)
+	assert.NoError(t, err)
+	assert.Equal(t, "test-username", repo.Username)
+	assert.Equal(t, "test-password", repo.Password)
+}
+
 func TestCreateExistingRepository(t *testing.T) {
 	clientset := getClientset(map[string]string{
 		"repositories": `- url: https://github.com/argoproj/argocd-example-apps`,
@@ -119,7 +156,7 @@ func TestGetRepository(t *testing.T) {
 		{
 			name:    "TestSecuredRepo",
 			repoURL: "https://secured/repo",
-			want:    &v1alpha1.Repository{Repo: "https://secured/repo", Username: "test-username", Password: "test-password"},
+			want:    &v1alpha1.Repository{Repo: "https://secured/repo", Username: "test-username", Password: "test-password", InheritedCreds: true},
 		},
 	}
 	for _, tt := range tests {
@@ -259,33 +296,35 @@ func TestUpdateRepositoryWithManagedSecrets(t *testing.T) {
 }
 
 func TestGetClusterSuccessful(t *testing.T) {
-	clusterURL := "https://mycluster"
+	server := "my-cluster"
+	name := "my-name"
 	clientset := getClientset(nil, &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "mycluster-443",
 			Namespace: testNamespace,
 			Labels: map[string]string{
 				common.LabelKeySecretType: common.LabelValueSecretTypeCluster,
 			},
 		},
 		Data: map[string][]byte{
-			"server": []byte(clusterURL),
+			"server": []byte(server),
+			"name":   []byte(name),
 			"config": []byte("{}"),
 		},
 	})
 
 	db := NewDB(testNamespace, settings.NewSettingsManager(context.Background(), clientset, testNamespace), clientset)
-	cluster, err := db.GetCluster(context.Background(), clusterURL)
-	assert.Nil(t, err)
-	assert.Equal(t, clusterURL, cluster.Server)
+	cluster, err := db.GetCluster(context.Background(), server)
+	assert.NoError(t, err)
+	assert.Equal(t, server, cluster.Server)
+	assert.Equal(t, name, cluster.Name)
 }
 
 func TestGetNonExistingCluster(t *testing.T) {
-	clusterURL := "https://mycluster"
+	server := "https://mycluster"
 	clientset := getClientset(nil)
 
 	db := NewDB(testNamespace, settings.NewSettingsManager(context.Background(), clientset, testNamespace), clientset)
-	_, err := db.GetCluster(context.Background(), clusterURL)
+	_, err := db.GetCluster(context.Background(), server)
 	assert.NotNil(t, err)
 	status, ok := status.FromError(err)
 	assert.True(t, ok)
@@ -293,19 +332,19 @@ func TestGetNonExistingCluster(t *testing.T) {
 }
 
 func TestCreateClusterSuccessful(t *testing.T) {
-	clusterURL := "https://mycluster"
+	server := "https://mycluster"
 	clientset := getClientset(nil)
 	db := NewDB(testNamespace, settings.NewSettingsManager(context.Background(), clientset, testNamespace), clientset)
 
 	_, err := db.CreateCluster(context.Background(), &v1alpha1.Cluster{
-		Server: clusterURL,
+		Server: server,
 	})
 	assert.Nil(t, err)
 
 	secret, err := clientset.CoreV1().Secrets(testNamespace).Get("cluster-mycluster-3274446258", metav1.GetOptions{})
 	assert.Nil(t, err)
 
-	assert.Equal(t, clusterURL, string(secret.Data["server"]))
+	assert.Equal(t, server, string(secret.Data["server"]))
 	assert.Equal(t, common.AnnotationValueManagedByArgoCD, secret.Annotations[common.AnnotationKeyManagedBy])
 }
 

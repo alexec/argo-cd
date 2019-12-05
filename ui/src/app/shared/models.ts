@@ -15,13 +15,17 @@ interface ItemsList<T> {
     metadata: models.ListMeta;
 }
 
-export interface ApplicationList extends ItemsList<Application> { }
+export interface ApplicationList extends ItemsList<Application> {}
 
-export interface SyncOperationResource { group: string; kind: string; name: string; }
+export interface SyncOperationResource {
+    group: string;
+    kind: string;
+    name: string;
+}
 
 export interface SyncStrategy {
-    apply: { force?: boolean } | null;
-    hook: { force?: boolean } | null;
+    apply: {force?: boolean} | null;
+    hook: {force?: boolean} | null;
 }
 
 export interface SyncOperation {
@@ -49,7 +53,7 @@ export const OperationPhases = {
     Failed: 'Failed' as OperationPhase,
     Error: 'Error' as OperationPhase,
     Succeeded: 'Succeeded' as OperationPhase,
-    Terminating: 'Terminating' as OperationPhase,
+    Terminating: 'Terminating' as OperationPhase
 };
 
 /**
@@ -84,7 +88,7 @@ export const ResultCodes = {
     Synced: 'Synced',
     SyncFailed: 'SyncFailed',
     Pruned: 'Pruned',
-    PruneSkipped: 'PruneSkipped',
+    PruneSkipped: 'PruneSkipped'
 };
 
 export interface ResourceResult {
@@ -167,6 +171,7 @@ export interface ApplicationSourceHelm {
 
 export interface ApplicationSourceKustomize {
     namePrefix: string;
+    nameSuffix: string;
     images: string[];
 }
 
@@ -175,22 +180,34 @@ export interface ApplicationSourceKsonnet {
     parameters: KsonnetParameter[];
 }
 
-export interface PluginEnv {
+export interface EnvEntry {
     name: string;
     value: string;
 }
 
 export interface ApplicationSourcePlugin {
     name: string;
-    env: PluginEnv[];
+    env: EnvEntry[];
+}
+
+export interface JsonnetVar {
+    name: string;
+    value: string;
+    code: boolean;
+}
+
+interface ApplicationSourceJsonnet {
+    extVars: JsonnetVar[];
+    tlas: JsonnetVar[];
 }
 
 export interface ApplicationSourceDirectory {
     recurse: boolean;
+    jsonnet?: ApplicationSourceJsonnet;
 }
 
 export interface SyncPolicy {
-    automated?: { prune: boolean;  selfHeal: boolean;  };
+    automated?: {prune: boolean; selfHeal: boolean};
 }
 
 export interface Info {
@@ -224,21 +241,21 @@ export interface RevisionHistory {
 
 export type SyncStatusCode = 'Unknown' | 'Synced' | 'OutOfSync';
 
-export const SyncStatuses: { [key: string]: SyncStatusCode } = {
+export const SyncStatuses: {[key: string]: SyncStatusCode} = {
     Unknown: 'Unknown',
     Synced: 'Synced',
-    OutOfSync: 'OutOfSync',
+    OutOfSync: 'OutOfSync'
 };
 
 export type HealthStatusCode = 'Unknown' | 'Progressing' | 'Healthy' | 'Suspended' | 'Degraded' | 'Missing';
 
-export const HealthStatuses: { [key: string]: HealthStatusCode } = {
+export const HealthStatuses: {[key: string]: HealthStatusCode} = {
     Unknown: 'Unknown',
     Progressing: 'Progressing',
     Suspended: 'Suspended',
     Healthy: 'Healthy',
     Degraded: 'Degraded',
-    Missing: 'Missing',
+    Missing: 'Missing'
 };
 
 export interface HealthStatus {
@@ -246,7 +263,7 @@ export interface HealthStatus {
     message: string;
 }
 
-export type State = models.TypeMeta & { metadata: models.ObjectMeta } & { status: any, spec: any };
+export type State = models.TypeMeta & {metadata: models.ObjectMeta} & {status: any; spec: any};
 
 export interface ResourceStatus {
     group: string;
@@ -284,7 +301,7 @@ export interface LoadBalancerIngress {
 
 export interface ResourceNode extends ResourceRef {
     parentRefs: ResourceRef[];
-    info: { name: string, value: string }[];
+    info: {name: string; value: string}[];
     networkingInfo?: ResourceNetworkingInfo;
     images?: string[];
     resourceVersion: string;
@@ -315,6 +332,7 @@ export interface SyncStatus {
 export interface ApplicationCondition {
     type: string;
     message: string;
+    lastTransitionTime: string;
 }
 
 export interface ApplicationSummary {
@@ -366,7 +384,7 @@ export interface AuthSettings {
     plugins: Plugin[];
 }
 
-export interface UserInfo  {
+export interface UserInfo {
     loggedIn: boolean;
     username: string;
     iss: string;
@@ -378,7 +396,7 @@ export type ConnectionStatus = 'Unknown' | 'Successful' | 'Failed';
 export const ConnectionStatuses = {
     Unknown: 'Unknown',
     Failed: 'Failed',
-    Successful: 'Successful',
+    Successful: 'Successful'
 };
 
 export interface ConnectionState {
@@ -395,7 +413,7 @@ export interface RepoCert {
     certInfo: string;
 }
 
-export interface RepoCertList extends ItemsList<RepoCert> { }
+export interface RepoCertList extends ItemsList<RepoCert> {}
 
 export interface Repository {
     repo: string;
@@ -404,7 +422,14 @@ export interface Repository {
     connectionState: ConnectionState;
 }
 
-export interface RepositoryList extends ItemsList<Repository> { }
+export interface RepositoryList extends ItemsList<Repository> {}
+
+export interface RepoCreds {
+    url: string;
+    username?: string;
+}
+
+export interface RepoCredsList extends ItemsList<RepoCreds> {}
 
 export interface Cluster {
     name: string;
@@ -413,12 +438,12 @@ export interface Cluster {
     serverVersion: string;
 }
 
-export interface ClusterList extends ItemsList<Cluster> { }
+export interface ClusterList extends ItemsList<Cluster> {}
 
 export interface KsonnetEnvironment {
     k8sVersion: string;
     path: string;
-    destination: { server: string; namespace: string; };
+    destination: {server: string; namespace: string};
 }
 
 export interface KsonnetParameter {
@@ -430,7 +455,7 @@ export interface KsonnetParameter {
 export interface KsonnetAppSpec {
     name: string;
     path: string;
-    environments: { [key: string]: KsonnetEnvironment; };
+    environments: {[key: string]: KsonnetEnvironment};
     parameters: KsonnetParameter[];
 }
 
@@ -476,7 +501,7 @@ export interface KustomizeAppSpec {
 
 export interface PluginAppSpec {
     name: string;
-    env: PluginEnv[];
+    env: EnvEntry[];
 }
 
 export interface ObjectReference {
@@ -520,7 +545,7 @@ export interface Event {
     reportingInstance: string;
 }
 
-export interface EventList extends ItemsList<Event> { }
+export interface EventList extends ItemsList<Event> {}
 
 export interface ProjectRole {
     description: string;
@@ -547,7 +572,7 @@ export interface ProjectSpec {
     roles: ProjectRole[];
     clusterResourceWhitelist: GroupKind[];
     namespaceResourceBlacklist: GroupKind[];
-    orphanedResources?: { warn?: boolean };
+    orphanedResources?: {warn?: boolean};
     syncWindows?: SyncWindows;
 }
 
@@ -591,7 +616,7 @@ export interface ResourceActionParam {
 export interface ResourceAction {
     name: string;
     params: ResourceActionParam[];
-    available: boolean;
+    disabled: boolean;
 }
 
 export interface SyncWindowsState {
@@ -602,5 +627,8 @@ export interface ApplicationSyncWindowState {
     activeWindows: SyncWindow[];
     assignedWindows: SyncWindow[];
     canSync: boolean;
+}
 
+export interface VersionMessage {
+    Version: string;
 }

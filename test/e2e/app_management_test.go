@@ -136,6 +136,32 @@ func TestAppDeletion(t *testing.T) {
 	assert.NotContains(t, output, Name())
 }
 
+func TestAppLabels(t *testing.T) {
+	Given(t).
+		Path("config-map").
+		When().
+		Create("-l", "foo=bar").
+		Then().
+		And(func(app *Application) {
+			assert.Contains(t, FailOnErr(RunCli("app", "list")), Name())
+			assert.Contains(t, FailOnErr(RunCli("app", "list", "-l", "foo=bar")), Name())
+			assert.NotContains(t, FailOnErr(RunCli("app", "list", "-l", "foo=rubbish")), Name())
+		}).
+		Given().
+		// remove both name and replace labels means nothing will sync
+		Name("").
+		When().
+		IgnoreErrors().
+		Sync("-l", "foo=rubbish").
+		DoNotIgnoreErrors().
+		Then().
+		Expect(Error("", "no apps match selector foo=rubbish")).
+		// check we can update the app and it is then sync'd
+		Given().
+		When().
+		Sync("-l", "foo=bar")
+}
+
 func TestTrackAppStateAndSyncApp(t *testing.T) {
 	Given(t).
 		Path(guestbookPath).
@@ -564,6 +590,18 @@ func TestLocalManifestSync(t *testing.T) {
 			res, _ := RunCli("app", "manifests", app.Name)
 			assert.Contains(t, res, "containerPort: 80")
 			assert.Contains(t, res, "image: gcr.io/heptio-images/ks-guestbook-demo:0.2")
+		})
+}
+
+func TestLocalSync(t *testing.T) {
+	Given(t).
+		// we've got to use Helm as this uses kubeVersion
+		Path("helm").
+		When().
+		Create().
+		Then().
+		And(func(app *Application) {
+			FailOnErr(RunCli("app", "sync", app.Name, "--local", "testdata/helm"))
 		})
 }
 
