@@ -69,16 +69,16 @@ export const ApplicationDeploymentHistory = ({
                         />
                         {info.status && (
                             <div className='row'>
-                                <div className='columns small-3'>
-                                    Status:
-                                </div>
+                                <div className='columns small-3'>Status:</div>
                                 <div className='columns small-9'>
-                                    <HealthStatusIcon state={info.status.health} label={true}/>
+                                    <HealthStatusIcon state={info.status.health} label={true} />
                                 </div>
                             </div>
                         )}
-                        <RevisionMetadataRows applicationName={app.metadata.name}
-                                              source={{ ...recentDeployments[index].source, targetRevision: recentDeployments[index].revision }}/>
+                        <RevisionMetadataRows
+                            applicationName={app.metadata.name}
+                            source={{...recentDeployments[index].source, targetRevision: recentDeployments[index].revision}}
+                        />
                         {selectedRollbackDeploymentIndex === index ? (
                             <DataLoader input={recentDeployments[index].source} load={src => services.repos.appDetails(src)}>
                                 {(details: models.RepoAppDetails) => (

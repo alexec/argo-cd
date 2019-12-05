@@ -162,7 +162,7 @@ export function syncStatusMessage(app: appModels.Application) {
     }
 }
 
-export const HealthStatusIcon = ({state, label}: { state: appModels.HealthStatus, label?: boolean }) => {
+export const HealthStatusIcon = ({state, label}: {state: appModels.HealthStatus; label?: boolean}) => {
     let color = COLORS.health.unknown;
     let icon = 'fa-question-circle';
 
@@ -188,7 +188,12 @@ export const HealthStatusIcon = ({state, label}: { state: appModels.HealthStatus
     if (state.message) {
         title = `${state.status}: ${state.message};`;
     }
-    return <React.Fragment><i title={title} className={'fa ' + icon} style={{color}}/>{label && title}</React.Fragment>;
+    return (
+        <React.Fragment>
+            <i title={title} className={'fa ' + icon} style={{color}} />
+            {label && title}
+        </React.Fragment>
+    );
 };
 
 export const ResourceResultIcon = ({resource}: {resource: appModels.ResourceResult}) => {

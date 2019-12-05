@@ -362,7 +362,7 @@ type ApplicationStatus struct {
 	Resources  []ResourceStatus       `json:"resources,omitempty" protobuf:"bytes,1,opt,name=resources"`
 	Sync       SyncStatus             `json:"sync,omitempty" protobuf:"bytes,2,opt,name=sync"`
 	Health     HealthStatus           `json:"health,omitempty" protobuf:"bytes,3,opt,name=health"`
-	History        RevisionHistories      `json:"history,omitempty" protobuf:"bytes,4,opt,name=history"`
+	History    RevisionHistories      `json:"history,omitempty" protobuf:"bytes,4,opt,name=history"`
 	Conditions []ApplicationCondition `json:"conditions,omitempty" protobuf:"bytes,5,opt,name=conditions"`
 	// ReconciledAt indicates when the application state was reconciled using the latest git version
 	ReconciledAt   *metav1.Time    `json:"reconciledAt,omitempty" protobuf:"bytes,6,opt,name=reconciledAt"`
